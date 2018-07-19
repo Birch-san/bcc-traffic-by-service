@@ -324,11 +324,13 @@ while 1:
         else:
           eprint('HTTP reply captured, but no corresponding HTTP request known. attributing data to _unknown.')
           service = '_unknown'
+        # for outbound requests only: we count bytes of each fragmented packet
+        # along the way. so we need only count this latest packet's bytes
         addBytesOutboundFromService(bytes_sent, service)
         try:
           del requested_service[partner_key_hex]
         except:
-          eprint("error during delete from bpf map ")
+          eprint("error during delete from requested_service map ")
       else:
         eprint("request: %s" % (text_section))
         service = getService(text_section)
@@ -378,11 +380,13 @@ while 1:
             else:
               eprint('HTTP reply captured, but no corresponding HTTP request known. attributing data to _unknown.')
               service = '_unknown'
-            addBytesOutboundFromService(prev_bytes_sent, service)
+            # for outbound requests only: we count bytes of each fragmented packet
+            # along the way. so we need only count this latest packet's bytes
+            addBytesOutboundFromService(bytes_sent, service)
             try:
               del requested_service[partner_key_hex]
             except:
-              eprint("error during delete from bpf map ")
+              eprint("error during delete from requested_service map ")
           else:
             eprint("request: %s" % (text_section))
             service = getService(text_section)
@@ -405,6 +409,18 @@ while 1:
           #append current payload
           prev_payload_string += payload_string
           prev_bytes_sent += bytes_sent
+
+          if (isReply(prev_payload_string)):
+            eprint("partial reply")
+            partner_key_hex = binascii.hexlify(partner_Key)
+            if (partner_key_hex in requested_service):
+              service = requested_service[partner_key_hex]
+            else:
+              eprint('partial HTTP reply captured, but no corresponding HTTP request known. attributing data to _unknown.')
+              service = '_unknown'
+            addBytesOutboundFromService(bytes_sent, service)
+          
+
           #check if not size exceeding (usually HTTP GET/POST url < 8K )
           if (len(prev_payload_string) > MAX_URL_STRING_LEN):
             eprint("url too long")
