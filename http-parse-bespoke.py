@@ -73,7 +73,6 @@ def getService(text_section):
 def getServiceForPath(path):
     """URI ends is followed by HTTP version (space-delimited)
     """
-    path = text_section.split(" HTTP", 1)[0]
     parsed = urlparse(path)
     query_str = parsed.query
     query_params = parse_qs(query_str)

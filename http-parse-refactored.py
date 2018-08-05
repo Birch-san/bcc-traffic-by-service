@@ -76,7 +76,6 @@ def getService(text_section):
 def getServiceForPath(path):
     """URI ends is followed by HTTP version (space-delimited)
     """
-    path = text_section.split(" HTTP", 1)[0]
     parsed = urlparse(path)
     query_str = parsed.query
     query_params = parse_qs(query_str)
@@ -261,7 +260,7 @@ class Session:
     if (self.is_request == False):
       return self.getPartner().getService()
     if (self.service is None):
-      self.service = self.getServiceForPath(self.parser.get_path())
+      self.service = getServiceForPath(self.parser.get_path())
     return self.service
 
   def eat(self, payload_string, bytes_sent):
@@ -280,7 +279,7 @@ class Session:
     # if self.parser.is_message_complete():
     #   eprint("".join(self.body))
 
-    if self.parser.get_status_code() is not None:
+    if self.parser.get_status_code() is not 0:
       self.is_request = False
       addBytesOutboundFromService(bytes_sent, self.getService())
     elif self.parser.is_message_begin():
@@ -396,6 +395,7 @@ while 1:
   eprint(seq_num)
 
   if (current_key_hex not in sessions):
+    eprint("adding %s to sessions" % (current_key_hex))
     sessions[current_key_hex] = Session(current_key_hex, partner_key_hex)
 
   session = sessions[current_key_hex]
