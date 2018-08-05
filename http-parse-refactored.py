@@ -1,4 +1,5 @@
 #!/usr/bin/python
+# pip install http-parser
 #
 #Bertrone Matteo - Polytechnic of Turin
 #November 2015
@@ -26,6 +27,15 @@ import struct
 import binascii
 import time
 
+# https://pypi.org/project/http-parser/
+# try to import C parser then fallback in pure python parser.
+try:
+    from http_parser.parser import HttpParser
+except ImportError:
+    from http_parser.pyparser import HttpParser
+
+# from http_parser.pyparser import HttpParser
+
 CLEANUP_N_PACKETS  = 50       #run cleanup every CLEANUP_N_PACKETS packets received
 MAX_URL_STRING_LEN = 8192     #max url string len (usually 8K)
 MAX_AGE_SECONDS    = 120       #max age entry in bpf_sessions map (formerly 30s, but I bumped it up to TCP default timeout)
@@ -42,6 +52,11 @@ def toHex(s):
 
     return reduce(lambda x,y:x+y, lst)
 
+def isBeginningOfStream(payload_string):
+    return payload_string[:3] in ["GET", "PUT"] \
+    or payload_string[:4] in ["POST", "HTTP", "HEAD"] \
+    or payload_string[:6] == "DELETE"
+
 def getUntilCRLF(str):
     """text section ends on CRLF
     """
@@ -50,19 +65,7 @@ def getUntilCRLF(str):
 def isReply(text_section):
     """HTTP requests begin with URI. replies begin with HTTP version
     """
-    return isStatusLine(text_section)
-
-def isBeginningOfMessage(payload_string):
-    return isRequestLine(payload_string) \
-    or isStatusLine(payload_string)
-
-def isRequestLine(payload_string):
-    return payload_string[:3] in ["GET", "PUT"] \
-    or payload_string[:4] in ["POST", "HTTP", "HEAD"] \
-    or payload_string[:6] == "DELETE"
-
-def isStatusLine(str):
-    return str[:5] == "HTTP/"
+    return text_section[:5] == "HTTP/"
 
 def getService(text_section):
     """URI ends is followed by HTTP version (space-delimited)
@@ -238,6 +241,59 @@ bytes_sent_dic = {}
 bytes_inbound_to_service = {}
 bytes_outbound_from_service = {}
 requested_service = {}
+sessions = {}
+
+class Session:
+  def __init__(self, current_key_hex, partner_key_hex):
+    # self.body = []
+    self.parser = HttpParser(kind=2, decompress=True)
+    self.data_bytes = 0
+    self.total_bytes = 0
+    self.current_key_hex = current_key_hex
+    self.partner_key_hex = partner_key_hex
+    self.is_request = None
+    self.service = None
+
+  def getPartner(self):
+    return sessions[partner_key_hex]
+
+  def getService(self):
+    if (self.is_request == False):
+      return self.getPartner().getService()
+    if (self.service is None):
+      self.service = self.getServiceForPath(self.parser.get_path())
+    return self.service
+
+  def eat(self, payload_string, bytes_sent):
+    received_len = len(payload_string)
+    self.data_bytes += received_len
+    self.total_bytes += bytes_sent
+    parsed_len = self.parser.execute(payload_string, received_len)
+    assert received_len == parsed_len
+
+    # if self.parser.is_headers_complete():
+    #   eprint(self.parser.get_headers())
+
+    # if self.parser.is_partial_body():
+    #   self.body.append(self.parser.recv_body())
+
+    # if self.parser.is_message_complete():
+    #   eprint("".join(self.body))
+
+    if self.parser.get_status_code() is not None:
+      self.is_request = False
+      addBytesOutboundFromService(bytes_sent, self.getService())
+    elif self.parser.is_message_begin():
+      self.is_request = True
+      addBytesInboundToService(bytes_sent, self.getService())
+
+    # if (self.parser.is_headers_complete() and not self.parser.is_message_complete()):
+    #   eprint("expected: %s, so far: %d" % (self.parser.get_headers().get('CONTENT-LENGTH'), self.data_bytes))
+
+    if self.parser.is_message_complete():
+      eprint("end!")
+
+
 
 while 1:
   #retrieve raw packet from socket
@@ -334,155 +390,16 @@ while 1:
   #useful for direct bpf_sessions map access
   current_Key = bpf_sessions.Key(ip_src,ip_dst,port_src,port_dst)
   partner_Key = bpf_sessions.Key(ip_dst,ip_src,port_dst,port_src)
+  current_key_hex = binascii.hexlify(current_Key)
+  partner_key_hex = binascii.hexlify(partner_Key)
 
   eprint(seq_num)
 
-  #looking for HTTP GET/POST request
-  if (isBeginningOfMessage(payload_string)):
-    eprint("[D] start")
-    #match: HTTP GET/POST packet found (i.e. it's a request)
-    if (crlf in payload_string):
-      eprint("[D] start.CRLF")
-      eprint("\n\n")
-      text_section = getUntilCRLF(payload_string)
-      if (isReply(text_section)):
-        eprint("[D] start.CRLF.reply")
-        eprint("reply: %s" % (text_section))
-        partner_key_hex = binascii.hexlify(partner_Key)
-        if (partner_key_hex in requested_service):
-          service = requested_service[partner_key_hex]
-        else:
-          eprint('HTTP reply captured, but no corresponding HTTP request known. attributing data to _unknown.')
-          service = '_unknown'
-        addBytesOutboundFromService(bytes_sent, service)
-        try:
-          del requested_service[partner_key_hex]
-        except:
-          eprint("error during delete from requested_service map ")
-      else:
-        eprint("[D] start.CRLF.req")
-        eprint("request: %s" % (text_section))
-        service = getService(text_section)
-        requested_service[binascii.hexlify(current_Key)] = service
-        addBytesInboundToService(bytes_sent, service)
+  if (current_key_hex not in sessions):
+    sessions[current_key_hex] = Session(current_key_hex, partner_key_hex)
 
-      #url entirely contained in first packet -> print it all
-      # printUntilCRLF(payload_string)
-      # printBytesAndService(bytes_sent, payload_string)
-
-      #delete current_Key from bpf_sessions, url already printed. current session not useful anymore
-      try:
-        del bpf_sessions[current_Key]
-      except:
-        eprint("error during delete from bpf map ")
-    else:
-      eprint("[D] start.!CRLF")
-      #url NOT entirely contained in first packet
-      #not found \r\n in payload.
-      #save current part of the payload_string in dictionary <key(ips,ipd,ports,portd),payload_string>
-      local_dictionary[binascii.hexlify(current_Key)] = payload_string
-      bytes_sent_dic[binascii.hexlify(current_Key)] = bytes_sent
-  else:
-    #NO match: HTTP GET/POST  NOT found
-    eprint("[D] !start")
-
-    #check if the packet belong to a session saved in bpf_sessions
-    if (current_Key in bpf_sessions):
-      eprint("[D] !start.in(bpf_sessions)")
-      #check id the packet belong to a session saved in local_dictionary
-      #(local_dictionary mantains HTTP GET/POST url not printed yet because splitted in N packets)
-      if (binascii.hexlify(current_Key) in local_dictionary):
-        eprint("[D] !start.in(bpf_sessions).in(local_dictionary)")
-        #first part of the HTTP GET/POST url is already present in local dictionary (prev_payload_string)
-        prev_payload_string = local_dictionary[binascii.hexlify(current_Key)]
-        prev_bytes_sent = bytes_sent_dic[binascii.hexlify(current_Key)]
-        #looking for CR+LF in current packet.
-        if (crlf in payload_string):
-          eprint("[D] !start.in(bpf_sessions).in(local_dictionary).CRLF")
-          #last packet. containing last part of HTTP GET/POST url splitted in N packets.
-          #append current payload
-          prev_payload_string += payload_string
-          prev_bytes_sent += bytes_sent
-
-          eprint("\n\n")
-          text_section = getUntilCRLF(prev_payload_string)
-          if (isReply(text_section)):
-            eprint("[D] !start.in(bpf_sessions).in(local_dictionary).CRLF.reply")
-            eprint("reply: %s" % (text_section))
-            partner_key_hex = binascii.hexlify(partner_Key)
-            if (partner_key_hex in requested_service):
-              service = requested_service[partner_key_hex]
-            else:
-              eprint('HTTP reply captured, but no corresponding HTTP request known. attributing data to _unknown.')
-              service = '_unknown'
-            # for outbound requests only: we count bytes of each fragmented packet
-            # along the way. so we need only count this latest packet's bytes
-            addBytesOutboundFromService(bytes_sent, service)
-            try:
-              del requested_service[partner_key_hex]
-            except:
-              eprint("error during delete from requested_service map ")
-          else:
-            eprint("[D] !start.in(bpf_sessions).in(local_dictionary).CRLF.!reply")
-            eprint("request: %s" % (text_section))
-            service = getService(text_section)
-            requested_service[binascii.hexlify(current_Key)] = service
-            addBytesInboundToService(prev_bytes_sent, service)
-          
-          #print HTTP GET/POST url
-          # printUntilCRLF(prev_payload_string)
-          # printBytesAndService(prev_bytes_sent, prev_payload_string)
-
-          #clean bpf_sessions & local_dictionary
-          try:
-            del bpf_sessions[current_Key]
-            del local_dictionary[binascii.hexlify(current_Key)]
-            del bytes_sent_dic[binascii.hexlify(current_Key)]
-          except:
-            eprint("error deleting from map or dictionary")
-        else:
-          eprint("[D] !start.in(bpf_sessions).in(local_dictionary).!CRLF")
-          eprint("not last packet")
-          #NOT last packet. containing part of HTTP GET/POST url splitted in N packets.
-          #append current payload
-          prev_payload_string += payload_string
-          prev_bytes_sent += bytes_sent
-
-          if (isReply(prev_payload_string)):
-            eprint("[D] !start.in(bpf_sessions).in(local_dictionary).!CRLF.reply")
-            eprint("partial reply")
-            partner_key_hex = binascii.hexlify(partner_Key)
-            if (partner_key_hex in requested_service):
-              service = requested_service[partner_key_hex]
-            else:
-              eprint('partial HTTP reply captured, but no corresponding HTTP request known. attributing data to _unknown.')
-              service = '_unknown'
-            addBytesOutboundFromService(bytes_sent, service)
-          else:
-            eprint("[D] !start.in(bpf_sessions).in(local_dictionary).!CRLF.!reply")
-
-          #check if not size exceeding (usually HTTP GET/POST url < 8K )
-          if (len(prev_payload_string) > MAX_URL_STRING_LEN):
-            eprint("url too long")
-            try:
-              del bpf_sessions[current_Key]
-              del local_dictionary[binascii.hexlify(current_Key)]
-              del bytes_sent_dic[binascii.hexlify(current_Key)]
-            except:
-              eprint("error deleting from map or dict")
-          #update dictionary
-          local_dictionary[binascii.hexlify(current_Key)] = prev_payload_string
-          bytes_sent_dic[binascii.hexlify(current_Key)] = prev_bytes_sent
-      else:
-        eprint("[D] !start.in(bpf_sessions).!in(local_dictionary)")
-        #first part of the HTTP GET/POST url is NOT present in local dictionary
-        #bpf_sessions contains invalid entry -> delete it
-        try:
-          del bpf_sessions[current_Key]
-        except:
-          eprint("error del bpf_session")
-    else:
-      eprint("[D] !start.!in(bpf_sessions)")
+  session = sessions[current_key_hex]
+  session.eat(payload_string, bytes_sent)
 
   #check if dirty entry are present in bpf_sessions
   if (((packet_count) % CLEANUP_N_PACKETS) == 0):
