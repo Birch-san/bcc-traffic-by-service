@@ -84,6 +84,15 @@ def getServiceForPath(path):
     eprint('HTTP request captured, but no service in URI. attributing data to _unspecified.')
     return '_unspecified'
 
+def getServiceForQS(query_str):
+    """URI ends is followed by HTTP version (space-delimited)
+    """
+    query_params = parse_qs(query_str)
+    if ('s' in query_params):
+      return query_params['s'][-1]
+    eprint('HTTP request captured, but no service in URI. attributing data to _unspecified.')
+    return '_unspecified'
+
 #print str until CR+LF
 def printUntilCRLF(str):
     for k in range (0,len(str)-1):
@@ -100,14 +109,21 @@ def addBytesInboundToService(bytes, service):
     new_bytes = current_bytes + bytes
     bytes_inbound_to_service[service] = new_bytes
     eprint("+%d bytes inbound to service '%s' = %d" % (bytes, service, new_bytes))
-    printTotalServiceCounts()
+    # printTotalServiceCounts()
+
+def addBytesUnknownboundToService(bytes, service):
+    current_bytes = bytes_unknownbound_to_service[service] if service in bytes_unknownbound_to_service else 0
+    new_bytes = current_bytes + bytes
+    bytes_unknownbound_to_service[service] = new_bytes
+    eprint("+%d bytes ?bound to service '%s' = %d" % (bytes, service, new_bytes))
+    # printTotalServiceCounts()
 
 def addBytesOutboundFromService(bytes, service):
     current_bytes = bytes_outbound_from_service[service] if service in bytes_outbound_from_service else 0
     new_bytes = current_bytes + bytes
     bytes_outbound_from_service[service] = new_bytes
     eprint("+%d bytes outbound from service '%s' = %d" % (bytes, service, new_bytes))
-    printTotalServiceCounts()
+    # printTotalServiceCounts()
 
 def printTotalServiceCounts():
     eprint("----")
@@ -116,6 +132,9 @@ def printTotalServiceCounts():
     eprint("-")
     eprint("outbound bytes:")
     printTotalServiceCountsFor(bytes_outbound_from_service)
+    # eprint("-")
+    # eprint("unknown bytes:")
+    # printTotalServiceCountsFor(bytes_unknownbound_to_service)
     eprint("----")
 
 def printTotalServiceCountsFor(dict):
@@ -239,6 +258,7 @@ local_dictionary = {}
 bytes_sent_dic = {}
 bytes_inbound_to_service = {}
 bytes_outbound_from_service = {}
+bytes_unknownbound_to_service = {}
 requested_service = {}
 sessions = {}
 
@@ -259,8 +279,10 @@ class Session:
   def getService(self):
     if (self.is_request == False):
       return self.getPartner().getService()
+    if (self.is_request is None):
+      return '_unknown'
     if (self.service is None):
-      self.service = getServiceForPath(self.parser.get_path())
+      self.service = getServiceForQS(self.parser.get_query_string())
     return self.service
 
   def eat(self, payload_string, bytes_sent):
@@ -268,7 +290,7 @@ class Session:
     self.data_bytes += received_len
     self.total_bytes += bytes_sent
     parsed_len = self.parser.execute(payload_string, received_len)
-    assert received_len == parsed_len
+    # assert received_len == parsed_len
 
     # if self.parser.is_headers_complete():
     #   eprint(self.parser.get_headers())
@@ -282,9 +304,12 @@ class Session:
     if self.parser.get_status_code() is not 0:
       self.is_request = False
       addBytesOutboundFromService(bytes_sent, self.getService())
+      # eprint(payload_string)
     elif self.parser.is_message_begin():
       self.is_request = True
       addBytesInboundToService(bytes_sent, self.getService())
+    else:
+      addBytesUnknownboundToService(bytes_sent, self.getService())
 
     # if (self.parser.is_headers_complete() and not self.parser.is_message_complete()):
     #   eprint("expected: %s, so far: %d" % (self.parser.get_headers().get('CONTENT-LENGTH'), self.data_bytes))
@@ -296,7 +321,7 @@ class Session:
 
 while 1:
   #retrieve raw packet from socket
-  packet_str = os.read(socket_fd,4096) #set packet length to max packet length on the interface
+  packet_str = os.read(socket_fd,65536) #set packet length to max packet length on the interface. formerly 4096
   packet_count += 1
 
   #DEBUG - print raw packet in hex format
@@ -370,10 +395,10 @@ while 1:
   port_dst = int(toHex(port_dst_str),16)
 
   seq_num_str = packet_str[tcp_header_offset+4:tcp_header_offset+8]
-  seq_num = int(toHex(seq_num_str),32)
+  seq_num = int(toHex(seq_num_str),16)
 
   ack_num_str = packet_str[tcp_header_offset+8:tcp_header_offset+12]
-  ack_num = int(toHex(ack_num_str),32)
+  ack_num = int(toHex(ack_num_str),16)
 
   #calculate payload offset
   payload_offset = tcp_header_offset + tcp_header_length
@@ -392,7 +417,10 @@ while 1:
   current_key_hex = binascii.hexlify(current_Key)
   partner_key_hex = binascii.hexlify(partner_Key)
 
+  eprint('')
   eprint(seq_num)
+  # eprint(seq_num_str)
+  # eprint(toHex(seq_num_str))
 
   if (current_key_hex not in sessions):
     eprint("adding %s to sessions" % (current_key_hex))
@@ -402,5 +430,5 @@ while 1:
   session.eat(payload_string, bytes_sent)
 
   #check if dirty entry are present in bpf_sessions
-  if (((packet_count) % CLEANUP_N_PACKETS) == 0):
-    cleanup()
+  # if (((packet_count) % CLEANUP_N_PACKETS) == 0):
+  #   cleanup()

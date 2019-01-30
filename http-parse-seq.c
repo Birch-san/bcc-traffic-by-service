@@ -40,12 +40,14 @@ int http_filter(struct __sk_buff *skb) {
 	struct ethernet_t *ethernet = cursor_advance(cursor, sizeof(*ethernet));
 	//filter IP packets (ethernet type = 0x0800)
 	if (!(ethernet->type == 0x0800)) {
+		// bpf_trace_printk("ETHTY\n");
 		goto DROP;
 	}
 
 	struct ip_t *ip = cursor_advance(cursor, sizeof(*ip));
 	//filter TCP packets (ip next protocol = 0x06)
 	if (ip->nextp != IP_TCP) {
+		// bpf_trace_printk("NEXTP\n");
 		goto DROP;
 	}
 
@@ -63,6 +65,7 @@ int http_filter(struct __sk_buff *skb) {
 
         //check ip header length against minimum
         if (ip_header_length < sizeof(*ip)) {
+        		// bpf_trace_printk("IPLEN\n");
                 goto DROP;
         }
 
@@ -92,6 +95,7 @@ int http_filter(struct __sk_buff *skb) {
 	//avoid invalid access memory
 	//include empty payload
 	if(payload_length < 7) {
+		// bpf_trace_printk("PAYLEN %u\n", tcp->seq_num);
 		goto DROP;
 	}
 
@@ -139,6 +143,7 @@ int http_filter(struct __sk_buff *skb) {
 		//send packet to userspace
 		goto KEEP;
 	}
+	// bpf_trace_printk("NOLEAF %u\n", tcp->seq_num);
 	goto DROP;
 
 	//keep the packet and send it to userspace retruning -1
@@ -148,10 +153,12 @@ int http_filter(struct __sk_buff *skb) {
 
 	//send packet to userspace returning -1
 	KEEP:
+	bpf_trace_printk("%u\n", tcp->seq_num);
 	return -1;
 
 	//drop the packet returning 0
 	DROP:
+	// bpf_trace_printk("DROP %u\n", tcp->seq_num);
 	return 0;
 	// return -1;
 
